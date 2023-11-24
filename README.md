@@ -10,19 +10,11 @@ dump outcoming packets.
 
 ```bash
 # ./tc-dump -h
-Usage of ./tc-dump:
-      --clear-tc-qdisc            clear tc-qdisc when exit
-  -d, --device strings            network devices to run tc-dump
-  -A, --filter-addr string        filter source or destination address with lower priority of --filter-saddr and --filter-daddr
-  -D, --filter-daddr string       filter destination address
-      --filter-dport uint16       filter destination port of TCP/UDP
-  -M, --filter-mark uint32        filter mark
-  -P, --filter-port uint16        filter source or destination port of TCP/UDP
-      --filter-proto string       filter l4 protocol, only TCP/UDP/ICMP
-  -S, --filter-saddr string       filter source address
-      --filter-sport uint16       filter source port of TCP/UDP
-  -V, --filter-vlan-id uint16     filter VLAN ID
-  -X, --filter-vxlan-vni uint32   filter VxLAN VNI
+Usage: ./tc-dump [options] [pcap-filter]
+    Available pcap-filter: see "man 7 pcap-filter"
+    Available options:
+  -d, --device strings   network devices to run tc-dump
+      --keep-tc-qdisc    keep tc-qdisc when exit
 pflag: help requested
 ```
 
@@ -54,3 +46,28 @@ ifindex: 2(enp1s0) dir=egress mark=0x0(0)
 ## Requirements
 
 `tc-dump` requires >= 5.2 kernel to run.
+
+## Build
+
+With latest `libpcap` installed, build `tc-dump` with:
+
+```bash
+go generate
+CGO_ENABLED=1 go build
+# ignore cgo warnings
+```
+
+Install latest `libpcap` on Ubuntu:
+
+```bash
+# Get latest libpcap from https://www.tcpdump.org/
+wget https://www.tcpdump.org/release/libpcap-1.10.4.tar.gz
+cd libpcap-1.10.4
+./configure --disable-rdma --disable-shared --disable-usb --disable-netmap --disable-bluetooth --disable-dbus --without-libnl
+make
+sudo make install
+```
+
+## Recommended reference
+
+1. [Tcpdump advanced filters](https://blog.wains.be/2007/2007-10-01-tcpdump-advanced-filters/)

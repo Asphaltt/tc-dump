@@ -8,12 +8,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/jschwinger233/elibpcap"
+	"golang.org/x/sync/errgroup"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang tcDump ./ebpf/tc_dump.c -- -D__TARGET_ARCH_x86 -I./ebpf/headers -Wall
@@ -35,11 +36,39 @@ func main() {
 		log.Fatalf("Failed to load bpf spec: %v", err)
 	}
 
-	var wg sync.WaitGroup
+	eventMapSpec := spec.Maps["events"]
+	eventMap, err := ebpf.NewMap(eventMapSpec)
+	if err != nil {
+		log.Fatalf("Failed to create perf-event map: %v", err)
+	}
+	defer eventMap.Close()
+
+	progSpec := spec.Programs["on_ingress"]
+	progSpec.Instructions, err = elibpcap.Inject(flags.PcapFilterExpr,
+		progSpec.Instructions, elibpcap.Options{
+			AtBpf2Bpf:  "filter_pcap_ebpf_l2",
+			DirectRead: true,
+			L2Skb:      true,
+		})
+	if err != nil {
+		log.Fatalf("Failed to inject pcap filter: %v", err)
+	}
+	progSpec = spec.Programs["on_egress"]
+	progSpec.Instructions, err = elibpcap.Inject(flags.PcapFilterExpr,
+		progSpec.Instructions, elibpcap.Options{
+			AtBpf2Bpf:  "filter_pcap_ebpf_l2",
+			DirectRead: true,
+			L2Skb:      true,
+		})
+	if err != nil {
+		log.Fatalf("Failed to inject pcap filter: %v", err)
+	}
+
 	rewriteConst := map[string]interface{}{
 		"__cfg": *cfg,
 	}
 
+	wg, ctx := errgroup.WithContext(ctx)
 	for ifindex, ifname := range devs {
 		rewriteConst["IFINDEX"] = uint32(ifindex)
 
@@ -49,29 +78,41 @@ func main() {
 
 		var obj tcDumpObjects
 		if err := spec.LoadAndAssign(&obj, &ebpf.CollectionOptions{
+			MapReplacements: map[string]*ebpf.Map{
+				"events": eventMap,
+			},
 			Programs: ebpf.ProgramOptions{
 				LogSize: ebpf.DefaultVerifierLogSize * 4,
 			},
 		}); err != nil {
+			var ve *ebpf.VerifierError
+			if errors.As(err, &ve) {
+				log.Printf("Failed to load bpf obj for if@%d:%s: %v\n%+v", ifindex, ifname, err, ve)
+			}
 			log.Fatalf("Failed to load bpf obj for if@%d:%s: %v", ifindex, ifname, err)
 		}
+		defer obj.Close()
 
-		wg.Add(1)
-		go func(obj *tcDumpObjects, ifindex int, ifname string) {
-			defer wg.Done()
-			runTcDump(ctx, obj, ifindex, ifname, flags, devs)
-		}(&obj, ifindex, ifname)
+		ifidx, ifname := ifindex, ifname
+		wg.Go(func() error {
+			runTcDump(ctx, &obj, ifidx, ifname, flags.KeepTcQdisc)
+			return nil
+		})
 	}
 
-	<-ctx.Done()
-	wg.Wait()
+	wg.Go(func() error {
+		handlePerfEvent(ctx, eventMap, devs)
+		return nil
+	})
+
+	_ = wg.Wait()
 }
 
-func runTcDump(ctx context.Context, obj *tcDumpObjects, ifindex int, ifname string, flags *flags, devs map[int]string) {
+func runTcDump(ctx context.Context, obj *tcDumpObjects, ifindex int, ifname string, keepTcQdisc bool) {
 	if err := replaceTcQdisc(ifindex); err != nil {
 		log.Printf("Failed to replace tc-qdisc for if@%d:%s: %v", ifindex, ifname, err)
 		return
-	} else if flags.ClearTcQdisc {
+	} else if !keepTcQdisc {
 		defer deleteTcQdisc(ifindex)
 	}
 
@@ -88,17 +129,17 @@ func runTcDump(ctx context.Context, obj *tcDumpObjects, ifindex int, ifname stri
 		defer deleteTcFilterEgress(ifindex, obj.OnEgress)
 	}
 
-	handlePerfEvent(ctx, obj.Events, ifindex, ifname, devs)
+	log.Printf("Listening events for if@%d:%s...", ifindex, ifname)
+
+	<-ctx.Done()
 }
 
-func handlePerfEvent(ctx context.Context, events *ebpf.Map, ifindex int, ifname string, devs map[int]string) {
+func handlePerfEvent(ctx context.Context, events *ebpf.Map, devs map[int]string) {
 	eventReader, err := perf.NewReader(events, 4096)
 	if err != nil {
-		log.Printf("Failed to create perf-event reader for if@%d:%s: %v", ifindex, ifname, err)
+		log.Printf("Failed to create perf-event reader : %v", err)
 		return
 	}
-
-	log.Printf("Listening events for if@%d:%s...", ifindex, ifname)
 
 	go func() {
 		<-ctx.Done()

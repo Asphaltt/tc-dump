@@ -2,13 +2,11 @@
 
 char __license[] SEC("license") = "GPL";
 
-#define BPF_OK 0
-
 static __always_inline void
 handle_skb(struct __sk_buff *skb, dir_t dir) {
   event_t ev = {};
 
-  if (filter(skb))
+  if (!filter(skb))
     return;
 
   ev.direction = dir;

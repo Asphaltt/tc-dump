@@ -1,7 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	flag "github.com/spf13/pflag"
 	"github.com/vishvananda/netlink"
@@ -10,21 +13,11 @@ import (
 type flags struct {
 	Devices []string
 
-	FilterVlanID   uint16
-	FilterVxlanVNI uint32
-
 	FilterMark uint32
 
-	FilterSaddr string
-	FilterDaddr string
-	FilterAddr  string
-	FilterSport uint16
-	FilterDport uint16
-	FilterPort  uint16
+	KeepTcQdisc bool
 
-	FilterProto string
-
-	ClearTcQdisc bool
+	PcapFilterExpr string
 }
 
 func parseFlags() *flags {
@@ -32,24 +25,18 @@ func parseFlags() *flags {
 
 	flag.StringSliceVarP(&f.Devices, "device", "d", nil, "network devices to run tc-dump")
 
-	flag.Uint16VarP(&f.FilterVlanID, "filter-vlan-id", "V", 0, "filter VLAN ID")
-	flag.Uint32VarP(&f.FilterVxlanVNI, "filter-vxlan-vni", "X", 0, "filter VxLAN VNI")
+	flag.BoolVar(&f.KeepTcQdisc, "keep-tc-qdisc", false, "keep tc-qdisc when exit")
 
-	flag.Uint32VarP(&f.FilterMark, "filter-mark", "M", 0, "filter mark")
-
-	flag.StringVarP(&f.FilterSaddr, "filter-saddr", "S", "", "filter source address")
-	flag.StringVarP(&f.FilterDaddr, "filter-daddr", "D", "", "filter destination address")
-	flag.StringVarP(&f.FilterAddr, "filter-addr", "A", "", "filter source or destination address with lower priority of --filter-saddr and --filter-daddr")
-
-	flag.Uint16Var(&f.FilterSport, "filter-sport", 0, "filter source port of TCP/UDP")
-	flag.Uint16Var(&f.FilterDport, "filter-dport", 0, "filter destination port of TCP/UDP")
-	flag.Uint16VarP(&f.FilterPort, "filter-port", "P", 0, "filter source or destination port of TCP/UDP")
-
-	flag.StringVar(&f.FilterProto, "filter-proto", "", "filter l4 protocol, only TCP/UDP/ICMP")
-
-	flag.BoolVar(&f.ClearTcQdisc, "clear-tc-qdisc", false, "clear tc-qdisc when exit")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options] [pcap-filter]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "    Available pcap-filter: see \"man 7 pcap-filter\"\n")
+		fmt.Fprintf(os.Stderr, "    Available options:\n")
+		flag.PrintDefaults()
+	}
 
 	flag.Parse()
+
+	f.PcapFilterExpr = strings.Join(flag.Args(), " ")
 
 	return &f
 }

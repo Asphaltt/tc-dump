@@ -46,23 +46,12 @@ typedef struct event {
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(u32));
+    __uint(value_size, sizeof(u32));
 } events SEC(".maps");
 
 typedef struct config_t {
-    __be16 vlan_id;
-    __be32 vxlan_vni;
-
     u32 mark;
-
-    __be32 saddr;
-    __be32 daddr;
-    __be32 addr;
-    __be16 sport;
-    __be16 dport;
-    __be16 port;
-
-    u8 l4_proto;
-    u8 pad1[3];
 } __attribute__((packed)) config_t;
 
 static volatile const config_t __cfg = {};
@@ -73,9 +62,36 @@ static __always_inline bool
 filter_meta(struct __sk_buff *skb, config_t *cfg)
 {
     if (cfg->mark && cfg->mark != skb->mark)
-        return true;
+        return false;
 
-    return false;
+    return true;
+}
+
+static __noinline bool
+filter_pcap_ebpf_l2(void *_skb, void *__skb, void *___skb, void *data, void* data_end)
+{
+	return data != data_end && _skb == __skb && __skb == ___skb;
+}
+
+static __always_inline bool
+filter_pcap_l2(struct __sk_buff *skb)
+{
+	void *data = (void *)(long) skb->data;
+	void *data_end = (void *)(long) skb->data_end;
+	return filter_pcap_ebpf_l2((void *)skb, (void *)skb, (void *)skb, data, data_end);
+}
+
+static __always_inline bool
+filter_pcap(struct __sk_buff *skb) {
+	return filter_pcap_l2(skb);
+}
+
+static __always_inline bool
+filter(struct __sk_buff *skb)
+{
+    config_t cfg = __cfg;
+
+    return filter_meta(skb, &cfg) && filter_pcap(skb);
 }
 
 static __always_inline bool
@@ -108,189 +124,9 @@ calc_l3_off(struct __sk_buff *skb)
 }
 
 static __always_inline bool
-filter_vlan(struct __sk_buff *skb, config_t *cfg)
-{
-    u8 vlan_present = skb->vlan_present;
-    u16 vlan_id = skb->vlan_tci;
-    vlan_id &= VLAN_ID_MASK;
-
-    struct ethhdr *eth;
-    struct vlan_hdr *vh;
-
-#define validate_skb(hdr)          \
-    if (!__validate_skb(skb, hdr)) \
-    return true
-
-    if (cfg->vlan_id && vlan_present && vlan_id != cfg->vlan_id)
-        return true;
-
-    eth = (typeof(eth))((u64)skb->data);
-    validate_skb(eth);
-
-    if (!is_vlan_proto(eth->h_proto))
-        return !is_ipv4_proto(eth->h_proto);
-
-    vh = (struct vlan_hdr *)(eth + 1);
-    validate_skb(vh);
-
-    if (cfg->vlan_id && (vh->h_vlan_TCI & VLAN_ID_MASK) == cfg->vlan_id)
-        return true;
-
-    return !is_ipv4_proto(vh->h_vlan_encapsulated_proto);
-}
-
-static __always_inline bool
-filter_proto(struct iphdr *iph, config_t *cfg)
-{
-    switch (iph->protocol) {
-    case IPPROTO_UDP:
-    case IPPROTO_TCP:
-    case IPPROTO_ICMP:
-        return cfg->l4_proto && iph->protocol != cfg->l4_proto;
-
-    default:
-        return true;
-    }
-}
-
-static __always_inline bool
 is_vxlan_port(__be16 port)
 {
     return port == bpf_htons(VXLAN_PORT);
-}
-
-static __always_inline bool
-filter_l3_l4_vxlan(struct __sk_buff *skb,
-    config_t *cfg)
-{
-    struct ethhdr *eth;
-    struct iphdr *iph;
-    struct udphdr *udph;
-    struct vxlan_hdr *vxh;
-    int l3_off, l4_off;
-
-#define validate_skb(hdr)          \
-    if (!__validate_skb(skb, hdr)) \
-    return true
-
-    l3_off = calc_l3_off(skb);
-    if (!l3_off)
-        return true;
-
-    iph = (typeof(iph))((u64)skb->data + l3_off);
-    validate_skb(iph);
-
-    if (iph->version != 4)
-        return true;
-
-    if (filter_proto(iph, cfg))
-        return true;
-
-    l4_off = l3_off + iph->ihl * 4;
-
-    do {
-        udph = (typeof(udph))((u64)skb->data + l4_off);
-        validate_skb(udph);
-
-        if (iph->protocol == IPPROTO_UDP && is_vxlan_port(udph->dest))
-            break;
-
-        // non-vxlan
-        if (cfg->l4_proto && iph->protocol != cfg->l4_proto)
-            return true;
-
-        if (iph->protocol == IPPROTO_ICMP)
-            return false;
-
-        if (cfg->saddr && iph->saddr != cfg->saddr)
-            return true;
-
-        if (cfg->daddr && iph->daddr != cfg->daddr)
-            return true;
-
-        if (cfg->addr && (iph->saddr != cfg->addr && iph->daddr != cfg->addr))
-            return true;
-
-        if (cfg->sport && udph->source != cfg->sport)
-            return true;
-
-        if (cfg->dport && udph->dest != cfg->dport)
-            return true;
-
-        if (cfg->port && (udph->source != cfg->port && udph->dest != cfg->port))
-            return true;
-
-        return false;
-
-    } while (0);
-
-    // vxlan
-
-    vxh = (struct vxlan_hdr *)((u64)skb->data + l4_off + sizeof(*udph));
-    validate_skb(vxh);
-
-    if (cfg->vxlan_vni && (vxh->vx_vni >> 8) != cfg->vxlan_vni)
-        return true;
-
-    eth = (typeof(eth))(vxh + 1);
-    validate_skb(eth);
-
-    if (!is_ipv4_proto(eth->h_proto))
-        return true;
-
-    iph = (typeof(iph))(eth + 1);
-    validate_skb(iph);
-    udph = (typeof(udph))(iph + 1);
-    validate_skb(udph);
-
-    if (iph->version != 4)
-        return true;
-
-    if (filter_proto(iph, cfg))
-        return true;
-
-    if (cfg->l4_proto && iph->protocol != cfg->l4_proto)
-        return true;
-
-    if (iph->protocol == IPPROTO_ICMP)
-        return false;
-
-    if (cfg->saddr && iph->saddr != cfg->saddr)
-        return true;
-
-    if (cfg->daddr && iph->daddr != cfg->daddr)
-        return true;
-
-    if (cfg->addr && (iph->saddr != cfg->addr && iph->daddr != cfg->addr))
-        return true;
-
-    if (cfg->sport && udph->source != cfg->sport)
-        return true;
-
-    if (cfg->dport && udph->dest != cfg->dport)
-        return true;
-
-    if (cfg->port && (udph->source != cfg->port && udph->dest != cfg->port))
-        return true;
-
-    return false;
-}
-
-static __always_inline bool
-filter(struct __sk_buff *skb)
-{
-    config_t cfg = __cfg;
-
-    if (filter_meta(skb, &cfg))
-        return true;
-
-    if (filter_vlan(skb, &cfg))
-        return true;
-
-    if (filter_l3_l4_vxlan(skb, &cfg))
-        return true;
-
-    return false;
 }
 
 static __always_inline void
@@ -327,6 +163,10 @@ copy_headers(struct __sk_buff *skb, event_t *ev)
 
     if (is_vlan_proto(eth->h_proto)) {
         memcpy_hdr(vh);
+        if (!is_ipv4_proto(vh->h_vlan_encapsulated_proto))
+            return;
+    } else if (!is_ipv4_proto(eth->h_proto)) {
+        return;
     }
 
     memcpy_ip_hdr(iph);
@@ -355,6 +195,10 @@ copy_headers(struct __sk_buff *skb, event_t *ev)
             memcpy_hdr(udph);
         }
     }
+
+#undef memcpy_ip_hdr
+#undef memcpy_hdr
+#undef __memcpy
 }
 
 static __always_inline void
