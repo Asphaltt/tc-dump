@@ -13,8 +13,9 @@ dump outcoming packets.
 Usage: ./tc-dump [options] [pcap-filter]
     Available pcap-filter: see "man 7 pcap-filter"
     Available options:
-  -d, --device strings   network devices to run tc-dump
-      --keep-tc-qdisc    keep tc-qdisc when exit
+  -d, --device strings       network devices to run tc-dump
+  -m, --filter-mark uint32   filter mark for tc-dump
+  -k, --keep-tc-qdisc        keep tc-qdisc when exit
 pflag: help requested
 ```
 

@@ -13,11 +13,11 @@ type directionType uint16
 func (d directionType) String() string {
 	switch d {
 	case 1:
-		return "ingress"
+		return DirIngress
 	case 2:
-		return "egress"
+		return DirEgress
 	default:
-		return "unkown"
+		return "UNKNOWN"
 	}
 }
 

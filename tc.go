@@ -140,3 +140,54 @@ func deleteTcFilterEgress(ifindex int, prog *ebpf.Program) error {
 		return nl.Filter().Delete(getTcFilterEgressObj(ifindex, prog))
 	})
 }
+
+func checkTcFilter(ifindex int, isIngress bool) (*ebpf.Program, bool, error) {
+	var prog *ebpf.Program
+
+	err := withTcnl(func(nl *tc.Tc) error {
+		var msg tc.Msg
+		if isIngress {
+			msg = prepareTcObjMsgIngress(ifindex)
+		} else {
+			msg = prepareTcObjMsgEgress(ifindex)
+		}
+		attrs, err := nl.Filter().Get(&msg)
+		if err != nil {
+			return fmt.Errorf("failed to get tc filter: %w", err)
+		}
+
+		if len(attrs) == 0 {
+			return nil
+		}
+
+		for i := range attrs {
+			attr := attrs[i].Attribute
+			if attr.BPF == nil {
+				continue
+			}
+
+			progFD, progID := attr.BPF.FD, attr.BPF.ID
+			if progID != nil {
+				prog, err = ebpf.NewProgramFromID(ebpf.ProgramID(*progID))
+				if err != nil {
+					return fmt.Errorf("failed to get ingress filter bpf prog: %w", err)
+				}
+				return nil
+			}
+			if progFD == nil {
+				prog, err = ebpf.NewProgramFromFD(int(*progFD))
+				if err != nil {
+					return fmt.Errorf("failed to get ingress filter bpf prog: %w", err)
+				}
+				return nil
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+
+	return prog, prog != nil, nil
+}

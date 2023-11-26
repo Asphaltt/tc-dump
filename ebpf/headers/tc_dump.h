@@ -5,6 +5,7 @@
 
 #include "bpf_endian.h"
 #include "bpf_helpers.h"
+#include "bpf_core_read.h"
 
 #define VLAN_ID_MASK 0x0FFF
 
@@ -70,28 +71,44 @@ filter_meta(struct __sk_buff *skb, config_t *cfg)
 static __noinline bool
 filter_pcap_ebpf_l2(void *_skb, void *__skb, void *___skb, void *data, void* data_end)
 {
-	return data != data_end && _skb == __skb && __skb == ___skb;
+    return data != data_end && _skb == __skb && __skb == ___skb;
 }
 
 static __always_inline bool
 filter_pcap_l2(struct __sk_buff *skb)
 {
-	void *data = (void *)(long) skb->data;
-	void *data_end = (void *)(long) skb->data_end;
-	return filter_pcap_ebpf_l2((void *)skb, (void *)skb, (void *)skb, data, data_end);
+    void *data = (void *)(long) skb->data;
+    void *data_end = (void *)(long) skb->data_end;
+    return filter_pcap_ebpf_l2((void *)skb, (void *)skb, (void *)skb, data, data_end);
 }
 
 static __always_inline bool
 filter_pcap(struct __sk_buff *skb) {
-	return filter_pcap_l2(skb);
+    return filter_pcap_l2(skb);
 }
 
 static __always_inline bool
-filter(struct __sk_buff *skb)
+filter_tc(struct __sk_buff *skb)
 {
     config_t cfg = __cfg;
 
     return filter_meta(skb, &cfg) && filter_pcap(skb);
+}
+
+static __always_inline bool
+filter_fentry(struct sk_buff *skb)
+{
+    config_t cfg = __cfg;
+
+    // filter meta
+    if (cfg.mark && cfg.mark != BPF_CORE_READ(skb, mark))
+        return false;
+
+    // filter pcap
+    void *skb_head = BPF_CORE_READ(skb, head);
+    void *data = skb_head + BPF_CORE_READ(skb, mac_header);
+    void *data_end = skb_head + BPF_CORE_READ(skb, tail);
+    return filter_pcap_ebpf_l2((void *)skb, (void *)skb, (void *)skb, data, data_end);
 }
 
 static __always_inline bool
@@ -130,7 +147,7 @@ is_vxlan_port(__be16 port)
 }
 
 static __always_inline void
-copy_headers(struct __sk_buff *skb, event_t *ev)
+copy_headers(void *__skb, event_t *ev, bool is_tc)
 {
     struct ethhdr *eth;
     struct vlan_hdr *vh;
@@ -141,16 +158,29 @@ copy_headers(struct __sk_buff *skb, event_t *ev)
     struct icmphdr *icmph;
     int var_off = 0, cpy_off = 0;
 
-#define __memcpy(hdr)                                                     \
-    do {                                                                  \
-        if (bpf_skb_load_bytes_relative(skb, var_off, ev->data + cpy_off, \
-                sizeof(*hdr), BPF_HDR_START_MAC)                          \
-            != 0)                                                         \
-            return;                                                       \
-                                                                          \
-        hdr = (typeof(hdr))(ev->data + cpy_off);                          \
-        cpy_off += sizeof(*hdr);                                          \
-        ev->total_len = cpy_off;                                          \
+#define __memcpy(hdr)                                                         \
+    do {                                                                      \
+        if (is_tc) {                                                          \
+            struct __sk_buff *skb = (struct __sk_buff *)(u64)__skb;           \
+            if (bpf_skb_load_bytes_relative(skb, var_off, ev->data + cpy_off, \
+                    sizeof(*hdr), BPF_HDR_START_MAC) != 0)                    \
+                return;                                                       \
+                                                                              \
+            hdr = (typeof(hdr))(ev->data + cpy_off);                          \
+            cpy_off += sizeof(*hdr);                                          \
+            ev->total_len = cpy_off;                                          \
+        } else {                                                              \
+            struct sk_buff *skb = (struct sk_buff *)(u64)__skb;               \
+            void *skb_head = BPF_CORE_READ(skb, head);                        \
+            void *data = skb_head + BPF_CORE_READ(skb, mac_header);           \
+            if (bpf_probe_read_kernel(ev->data + cpy_off, sizeof(*hdr),       \
+                data + var_off) != 0)                                         \
+                return;                                                       \
+                                                                              \
+            hdr = (typeof(hdr))(ev->data + cpy_off);                          \
+            cpy_off += sizeof(*hdr);                                          \
+            ev->total_len = cpy_off;                                          \
+        }                                                                     \
     } while (0)
 #define memcpy_hdr(hdr) \
     __memcpy(hdr);      \
@@ -202,7 +232,7 @@ copy_headers(struct __sk_buff *skb, event_t *ev)
 }
 
 static __always_inline void
-set_output(struct __sk_buff *skb, event_t *ev)
+set_output_tc(struct __sk_buff *skb, event_t *ev)
 {
     ev->meta.ifindex = IFINDEX;
     ev->meta.mark = skb->mark;
@@ -212,7 +242,21 @@ set_output(struct __sk_buff *skb, event_t *ev)
         ev->vlan.h_vlan_TCI = skb->vlan_tci;
     }
 
-    copy_headers(skb, ev);
+    copy_headers(skb, ev, true);
+}
+
+static __always_inline void
+set_output_fentry(struct sk_buff *skb, event_t *ev)
+{
+    ev->meta.ifindex = IFINDEX;
+    ev->meta.mark = BPF_CORE_READ(skb, mark);
+
+    if (BPF_CORE_READ(skb, vlan_proto)) {
+        ev->vlan.h_vlan_encapsulated_proto = 1; // indicate tci existing
+        ev->vlan.h_vlan_TCI = BPF_CORE_READ(skb, vlan_tci);
+    }
+
+    copy_headers(skb, ev, false);
 }
 
 #endif

@@ -24,8 +24,9 @@ func parseFlags() *flags {
 	var f flags
 
 	flag.StringSliceVarP(&f.Devices, "device", "d", nil, "network devices to run tc-dump")
+	flag.Uint32VarP(&f.FilterMark, "filter-mark", "m", 0, "filter mark for tc-dump")
 
-	flag.BoolVar(&f.KeepTcQdisc, "keep-tc-qdisc", false, "keep tc-qdisc when exit")
+	flag.BoolVarP(&f.KeepTcQdisc, "keep-tc-qdisc", "k", false, "keep tc-qdisc when exit")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] [pcap-filter]\n", os.Args[0])

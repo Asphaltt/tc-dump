@@ -5,13 +5,13 @@ go 1.21.0
 toolchain go1.21.3
 
 require (
-	github.com/cilium/ebpf v0.11.0
+	github.com/cilium/ebpf v0.12.3
 	github.com/florianl/go-tc v0.4.1
 	github.com/jschwinger233/elibpcap v0.0.0-20231010035657-e99300096f5e
 	github.com/spf13/pflag v1.0.5
 	github.com/vishvananda/netlink v1.1.0
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
-	golang.org/x/sys v0.10.0
+	golang.org/x/sys v0.14.1-0.20231108175955-e4099bfacb8c
 )
 
 require (
