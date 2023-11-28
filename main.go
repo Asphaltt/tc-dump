@@ -215,6 +215,14 @@ func runTcDump(ctx context.Context, obj *tcDumpObjects, ifindex int, ifname stri
 	<-ctx.Done()
 }
 
+func copyMap(src map[string]any) map[string]any {
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
 func attachFentryTc(prog *ebpf.Program, eventMap *ebpf.Map, spec *ebpf.CollectionSpec, rc map[string]any,
 	ifindex int, ifname string, isIngress bool,
 ) (*fentryTcObjects, error) {
@@ -222,9 +230,11 @@ func attachFentryTc(prog *ebpf.Program, eventMap *ebpf.Map, spec *ebpf.Collectio
 	if isIngress {
 		dir = uint16(DirectionIngress)
 	}
-	rc["DIR"] = dir
 
-	if err := spec.RewriteConstants(rc); err != nil {
+	rewriteConst := copyMap(rc)
+	rewriteConst["DIR"] = dir
+
+	if err := spec.RewriteConstants(rewriteConst); err != nil {
 		log.Fatalf("Failed to rewrite const for if@%d:%s: %v", ifindex, ifname, err)
 	}
 
